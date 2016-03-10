@@ -1,0 +1,148 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<title>podfeeder - Extract show names from an RSS feed</title>
+<link rev="made" href="mailto:root@b07.apple.com" />
+</head>
+
+<body style="background-color: white">
+
+<p><a name="__index__"></a></p>
+<!-- INDEX BEGIN -->
+
+<ul>
+
+	<li><a href="#name">NAME</a></li>
+	<li><a href="#synopsis">SYNOPSIS</a></li>
+	<li><a href="#options">OPTIONS</a></li>
+	<li><a href="#description">DESCRIPTION</a></li>
+	<li><a href="#examples">EXAMPLES</a></li>
+	<li><a href="#see_also">SEE ALSO</a></li>
+	<li><a href="#authors">AUTHORS</a></li>
+	<li><a href="#bugs">BUGS</a></li>
+</ul>
+<!-- INDEX END -->
+
+<hr />
+<p>
+</p>
+<h1><a name="name">NAME</a></h1>
+<p>podfeeder - Extract show names from an RSS feed</p>
+<p>
+</p>
+<hr />
+<h1><a name="synopsis">SYNOPSIS</a></h1>
+<p>podfeeder [options] -db=[file] [feed ...]</p>
+<pre>
+ Options:</pre>
+<pre>
+    -db=[file]              name of a file to contain file path to 
+                            podcast name mappings; mandatory
+    -pathmap=[file]         file that translates path names in the
+                            feed
+    -force                  update all shows found in feed
+    -help                   see this text
+    -man                    see this text as a man page</pre>
+<p>
+</p>
+<hr />
+<h1><a name="options">OPTIONS</a></h1>
+<dl>
+<dt><strong><a name="item__2ddb"><strong>-db</strong></a></strong><br />
+</dt>
+<dd>
+This option is mandatory. It names the text file that contains the mapping between podcast URIs
+and show names. Once updated using <strong>podfeeder</strong> pass the name of this file to <strong>podalyzer</strong> to
+have shows properly named in the podalyzer report.
+</dd>
+<p></p>
+<dt><strong><a name="item__2dpathmap"><strong>-pathmap</strong></a></strong><br />
+</dt>
+<dd>
+If the feed uses different path names from those found in the log file use a pathmap file to
+translate the paths found in the feed. For example if the feed uses paths like
+</dd>
+<dd>
+<pre>
+    /podcasts/mycast/whatever.mp3</pre>
+</dd>
+<dd>
+<p>but the log files list requests for that file as</p>
+</dd>
+<dd>
+<pre>
+    /media/someclient/whatever.mp3</pre>
+</dd>
+<dd>
+<p>make a file called pathmap.db containing the following</p>
+</dd>
+<dd>
+<pre>
+    /podcasts/mycast/   /media/someclient/</pre>
+</dd>
+<dd>
+<p>and name it on the command line like this</p>
+</dd>
+<dd>
+<pre>
+    podfeeder -pathmap=pathmap.db feed.xml &gt; shows.db</pre>
+</dd>
+<dd>
+<p>to have shows.db contain properly translated paths.</p>
+</dd>
+<p></p>
+<dt><strong><a name="item__2dforce"><strong>-force</strong></a></strong><br />
+</dt>
+<dd>
+Force <strong>podfeeder</strong> to update all entries in the mapping file for which it finds entries in the
+feed. Without this flag only missing mappings will be added to the mapping file.
+</dd>
+<p></p></dl>
+<p>
+</p>
+<hr />
+<h1><a name="description">DESCRIPTION</a></h1>
+<p><strong>podfeeder</strong> fetches and analyses one or more RSS feeds to extract show names for URIs and updates
+a mapping file which can then be passed to <strong>podalyser</strong> to generate reports in which shows are
+correctly named.</p>
+<p>
+</p>
+<hr />
+<h1><a name="examples">EXAMPLES</a></h1>
+<pre>
+    podfeeder -db=mapping.db <a href="http://example.com/category/podcasts/feed">http://example.com/category/podcasts/feed</a>
+    podalyzer -db=mapping.db --outdir=report --title='Example Podcast' logs</pre>
+<p>
+</p>
+<hr />
+<h1><a name="see_also">SEE ALSO</a></h1>
+<pre>
+    podalyser</pre>
+<p>
+</p>
+<hr />
+<h1><a name="authors">AUTHORS</a></h1>
+<pre>
+    Written by Andy Armstrong (andy@hexten.net) with much inspiration from Kevin Devin
+    (Friends in Tech). Kevin's podstats script may be found here:</pre>
+<pre>
+    <a href="http://forums.friendsintech.com/viewtopic.php?t=">http://forums.friendsintech.com/viewtopic.php?t=</a>\
+       40&amp;sid=055c024f369658b97e01dd7ef282d71d
+
+</pre>
+<pre>
+    (url wrapped for formatting - here is a shorter version: <a href="http://lyxus.net/cfv">http://lyxus.net/cfv</a>)
+
+</pre>
+<p>
+</p>
+<hr />
+<h1><a name="bugs">BUGS</a></h1>
+<pre>
+    If you find any please report them to andy@hexten.net.
+
+</pre>
+
+</body>
+
+</html>

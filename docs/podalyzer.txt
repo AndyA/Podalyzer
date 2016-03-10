@@ -1,0 +1,226 @@
+NAME
+    podalyzer - Analyse weblogs and produce an HTML formatted report
+
+SYNOPSIS
+    podalyzer [options] [file ...]
+
+     Options:
+
+        -title=[text]           specify the title of the report
+        -outdir=[dir]           specify the output directory for the report
+        -index=[name.html]      specify the name of the start page of the 
+                                report
+        -style=[uri]            specify the URI relative to the report 
+                                directory of the stylesheet to use
+        -extension=[ext,...]    specify the filename extension(s) to be 
+                                recognised as media files
+        -path=[path,...]        specify the paths where media files should
+                                be recognised
+        -feed=[url]             specify the URL of the feed to enable feed
+                                analysis
+        -db=[file]              name of a file to contain file path to 
+                                podcast name mappings
+        -logformat=[format]     specify the format of the log file; 
+                                currently 'common' and 'extended' are 
+                                supported
+        -width=[width]          specify the width of the graphs
+        -height=[height]        specify the height of the graphs
+        -filter                 don't produce report; instead output those
+                                lines from the log that would have been 
+                                included in the report
+        -csv                    output the matching log lines in CSV format
+        -help                   see this summary
+        -man                    see this text as a man page
+
+OPTIONS
+    -title  Specify the title of the report. The title is included at the
+            top of each page.
+
+    -outdir The destination directory for the report. If it doesn't exist it
+            will be created.
+
+    -index  Specify the name of the starting page of the report. All other
+            pages and images in the report will have names based on this
+            name in such a way that multiple reports can be generated in the
+            same directory without clobbering each other's files.
+
+    -style  Specify the URI relative to the report directory of a stylesheet
+            to be used for the report. If no stylesheet is named here a
+            default stylesheet (called style.css) will be generated in the
+            output directory.
+
+    -extension
+            By default podalyzer recognises a number of common extensions
+            that are used for media files. Specifically:
+
+                mp3 mp4 m4a m4b m4p m4u m4v mpeg mpg mpe mxu mov aac ogg wma asx pdf
+
+            If you have files with extensions not in this list that you wish
+            to have included in the report you should name *all* of the
+            extensions you are using like this:
+
+                podalyzer -extension=mp2,wav,au
+
+            Note that the first use of -extension overrides the built in
+            list so you may have to name extensions that would normally be
+            recognised by default.
+
+    -path   Limit the files included in the report to those found in the
+            specified subdirectories like this:
+
+                podalyzer -path=/media,/podcast/released
+
+            If no paths are specified the report will include files in any
+            directory on the server.
+
+    -feed   Specify the URL of the feed(s) for any podcast(s) you are
+            analysing. May be used more than once to specify multiple feeds.
+
+            Specifying the feed URL enables extra functionality in Podalyzer
+            to analyse the number of feed subscribers by day and the
+            proportion of downloads that originate from subscribers to the
+            feed.
+
+            If using Podalyzer in filter or csv modes specify any feed URLs
+            to have the feeds included in the filtered output.
+
+    -db     Provide the name of a text file that records the relationship
+            between filenames on the server (such as /media/podcast001.mp3)
+            and the name of the show they correspond to (such as 'Brand New
+            Podcast Show 1'). By default podalyzer will make up a show name
+            based on the filename (it would choose 'podcast001.mp3' in the
+            example above). If you wish you can maintain a file that lists
+            the correspondance between filenames and show names, for
+            example:
+
+                /media/podcast001.mp3   Brand New Podcast Show 1
+                /media/podcast002.mp3   Podcast 2 from me
+                /media/podcast003.mp3   podcast003.mp3
+
+            Each time podalyzer runs it will add to this file any missing
+            entries corresponding to media files it has not seen before. The
+            third entry in the example above has been generated in this way.
+            To have podcast003.mp3 correctly named in the report either edit
+            the database file to correct the name or use podfeeder to create
+            mappings automatically.
+
+    -logformat
+            Tell podalyzer what format to expect the raw logfiles in.
+            Currently 'common' and 'extended' are supported - corresponding
+            to Common Log Format and Extended Common Log format
+            respectively. If you have logs in a format that isn't supported
+            please provide a representative sample to me (andy@hexten.net)
+            and I'll add support for it.
+
+    -width  Set the width of generated graphs. Defaults to 400.
+
+    -height Set the height of generated graphs. Defaults to 300.
+
+    -filter Instead of producing a report output the lines from the input
+            log files that would have been processed. Can be used to produce
+            filtered log files that contain only interesting data.
+
+    -csv    Instead of producing a report output the lines that would have
+            been processed as a CSV file. =back
+
+DESCRIPTION
+    podalyzer scans one or more web server log files, extracts entries that
+    result from downloads of media files (typically podcasts) and generates
+    a report based on those entries. In addition to reporting the number and
+    size of downloaded files it generates a number of graphs showing
+    downloads over time, downloads per 'show' and (if the Geo::IP module is
+    installed) a breakdown by country.
+
+    The names of one or more log files are passed on the command line. Any
+    directories named on the command line will be recursively searched. Note
+    that if the directory or any of its sub-directories contain non-log
+    files podalyzer will attempt to process them too. If any files named on
+    the command line have the extension gz podalyzer will attempt to expand
+    them using the command gzip -cd *filename*. If this command is not
+    available on your system attempts to expand gzip compressed log files
+    will fail.
+
+    The -path and -extension options allow fine control over the request
+    URIs that are included in the report. The -db option allows a 'database'
+    (actually a regular text file) to be named that will provide mapping
+    between request URIs (such as /media/podcast001.mp3) and show names
+    (such as 'My Podcast Show 1'). The podfeeder program (which should have
+    been distributed with this program) allows a show mapping database to be
+    generated from an RSS feed.
+
+    When the -filter option is specified podalyzer outputs any lines from
+    the input log file that match the criteria specified with -path and
+    -extension - in effect producing a new log file containing only lines of
+    interest to podalyzer. This is useful in situations where the logs
+    contain a large number of entries that are not interesting to podalyzer.
+    Assuming the logs are rotated regularly, podalyzer -filter may be used
+    to maintain a directory of filtered log files containing only the
+    interesting lines from the (potentially huge) original logs. As
+    podalyzer must rescan all the relevant log files each times it runs this
+    can greatly speed up processing.
+
+EXAMPLES
+    A shell script that uses podalyser in filter mode to maintain a
+    directory of podcast specific log files and then runs podalyser in
+    normal report generation mode to produce a report from those logs:
+
+        #!/bin/sh
+
+        podalyzer=/root/bin/podalyzer
+        podfeeder=/root/bin/podfeeder
+
+        feed=http://example.com/category/podcasts/feed
+        title='My Podcast'
+
+        webroot=/usr/local/apache-php
+        logdir=$webroot/logs
+        filtlogdir=podcasts
+
+        outdir=$webroot/htdocs/stats
+
+        cd $logdir
+        mkdir -p $filtlogdir
+
+        # Update filtered logs
+        for log in access_log*
+        do
+            # Make the name of the podcast log file
+            flog=`echo $filtlogdir/$log | sed -e 's/\.gz$//'`
+            # If the main log is newer than the podcast log
+            # or the podcast log doesn't yet exist use
+            # podalyzer in filter mode to create it
+            if [ ! -f $flog -o $log -nt $flog ]
+            then
+                $podalyzer --filter $log > $flog
+            fi
+        done
+
+        # Read feed
+        $podfeeder --db=shows.db --force $feed
+        # Generate report
+        $podalyzer --db=shows.db --outdir=$outdir --title="$title" $filtlogdir
+
+SEE ALSO
+    podfeeder
+
+AUTHORS
+    Written by Andy Armstrong (andy@hexten.net) with much inspiration from
+    Kevin Devin (Friends in Tech). Kevin's podstats script may be found
+    here:
+
+    http://forums.friendsintech.com/viewtopic.php?t=\
+    40&sid=055c024f369658b97e01dd7ef282d71d
+
+    (url wrapped for formatting - here is a shorter version:
+    http://lyxus.net/cfv)
+
+BUGS
+    If you find any please report them to andy@hexten.net.
+
+POD ERRORS
+    Hey! The above document had some coding errors, which are explained
+    below:
+
+    Around line 1503:
+        You forgot a '=back' before '=head1'
+

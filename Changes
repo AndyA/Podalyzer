@@ -1,0 +1,11 @@
+0.1 2006-02-07
+    Initial release
+    
+0.2 2006-02-08
+    Added boilerplate and tidied a few things
+
+< We seem to have lost a few versions here. Oops. >
+
+0.9 2007-05-24
+    Fixed handling of log files which contain full URLs
+    

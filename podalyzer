@@ -1,0 +1,1625 @@
+#!/usr/bin/perl -w
+
+use strict;
+use Getopt::Long;
+use Time::Local;
+use POSIX qw(strftime);
+use Pod::Usage;
+use File::Basename;
+use File::Path;
+use File::Spec::Functions;
+use HTML::Entities;
+use GD::Graph;
+use GD::Graph::colour qw(:colours);
+use GD::Graph::bars;
+use GD::Graph::lines;
+use GD::Graph::pie;
+use utf8;
+
+my $VERSION = '0.9';
+my $NAME    = 'Podalyzer';
+my $HOME    = 'http://hexten.net/podalyzer/';
+
+my @GZIP = qw(gzip -cd);
+
+# Geo::IP may not be present. If it isn't downloads won't be analysed by
+# country. The 0 that's passed to Geo::IP->new() should really be the
+# symbol GEOIP_STANDARD - but makes the whole eval fail on Perl 5.8.3
+# with an error about barewords.
+my $gi
+ = eval 'require Geo::IP; import Geo::IP; ' . 'return Geo::IP->new(0)';
+
+$| = 1;
+
+# Name used for special 'All downloads' category
+my $ALL = 'All Files';
+
+# Map month names to month indexes
+my %MON = (
+  'Jan' => 0,
+  'Feb' => 1,
+  'Mar' => 2,
+  'Apr' => 3,
+  'May' => 4,
+  'Jun' => 5,
+  'Jul' => 6,
+  'Aug' => 7,
+  'Sep' => 8,
+  'Oct' => 9,
+  'Nov' => 10,
+  'Dec' => 11
+);
+
+# Handlers for different log formats. Each handler is a sub that accepts
+# a line and returns an array containing ( $time, $ip, $method, $path,
+# $status, $size, $agent )
+my %LOGFORMAT = (
+
+  # Apache extended log format
+  'extended' => sub {
+    return undef unless $_[0] =~ m!^ (\S+) \s+ (\S+) \s+ (\S+) \s+ 
+                \[ (\d+)/(\w+)/(\d+):(\d+):(\d+):(\d+) \s+ ([-+]\d+) \] \s+
+                " (\w+) \s+ ([^\s]+) \s+ ([^"]+) " \s+
+                (\S+) \s+ (\S+) \s+
+                \"([^\"]*)\" \s+
+                \"([^\"]*)\" !x;    #"
+
+    my (
+      $host,   $day,    $month, $year,   $hour, $min, $sec,
+      $offset, $method, $path,  $status, $size, $agent
+    ) = ( $1, $4, $5, $6, $7, $8, $9, $10, $11, $12, $14, $15, $17 );
+
+    my $time
+     = logtime( $day, $month, $year, $hour, $min, $sec, $offset );
+    return
+     defined( $time )
+     ? ( $time, $host, $method, $path, $status, $size, $agent )
+     : ();
+  },
+
+  # Apache common log format
+  'common' => sub {
+    return undef unless $_[0] =~ m!^ (\S+) \s+ (\S+) \s+ (\S+) \s+ 
+                \[ (\d+)/(\w+)/(\d+):(\d+):(\d+):(\d+) \s+ ([-+]\d+) \] \s+
+                " (\w+) \s+ ([^\s]+) \s+ ([^"]+) " \s+
+                (\S+) \s+ (\S+) !x;    #"
+
+    my (
+      $host, $day,    $month,  $year, $hour,   $min,
+      $sec,  $offset, $method, $path, $status, $size
+    ) = ( $1, $4, $5, $6, $7, $8, $9, $10, $11, $12, $14, $15 );
+
+    my $time
+     = logtime( $day, $month, $year, $hour, $min, $sec, $offset );
+    return
+     defined( $time )
+     ? ( $time, $host, $method, $path, $status, $size, undef )
+     : ();
+  }
+);
+
+my $DAY = 24 * 60 * 60;    # Length of a day in seconds
+my $KB  = 1024;            # Size of one KB
+my $MB  = $KB * $KB;       #   "      "  MB
+my $GB  = $MB * $KB;       #   "      "  GB
+my $TB  = $GB * $KB;       #   "      "  TB
+
+# Status codes and whether they represent a full or partial download
+my %STATUS = (
+  200 => 'full',
+  202 => 'full',
+  206 => 'partial'
+);
+
+# Global workspace
+
+my %size      = (); # Show length in bytes
+my %sizes     = (); # Show -> Size -> Frequency
+my %log       = (); # Interesting log entries
+my %cache     = (); # Country lookup cache
+my %byday     = (); # Podcasts by path, by day
+my %bycty     = (); # Podcasts by path, by country
+my %byagt     = (); # Podcasts by path, by user agent (currently unused)
+my %first     = (); # First time podcast seen by path
+my %last      = (); # Last time podcast seen by path
+my %total     = (); # Total downloads by path
+my %bytes     = (); # Bandwidth by day
+my %waste     = (); # Uncounted request by show
+my %feedhit   = (); # Hits by feed by day by uid
+my %feedtot   = (); # Hits by feed
+my %feedfirst = (); # First hit on a feed by uid
+my %fromfeed  = (); # Count of shows from feed by day
+
+my $showdb   = {};  # Show name lookup database
+my %template = ();
+
+# Command line options
+
+my @ext     = ();                 # List of extensions to include
+my @okpath  = ();                 # List of URI prefixes to include
+my @feed    = ();                 # List of feeds to analyse
+my $man     = 0;                  # Show man page?
+my $help    = 0;                  # Show help?
+my $filter  = 0;                  # Filter mode?
+my $csv     = 0;                  # CSV mode?
+my $table   = 0;                  # Unused now
+my $db      = undef;              # Show lookup DB name
+my $format  = 'extended';         # Log format to use
+my $outdir  = '.';                # Output directory
+my $index   = 'index.html';       # Default index page name
+my $style   = undef;              # Stylesheet name
+my $title   = 'Podcast Stats';    # Report title
+my $graph_w = 400;                # Graph width
+my $graph_h = 300;                # Graph height
+
+GetOptions(
+  'extension=s' => \@ext,
+  'path=s'      => \@okpath,
+  'feed=s'      => \@feed,
+  'help|?'      => \$help,
+  'man'         => \$man,
+  'filter'      => \$filter,
+  'csv'         => \$csv,
+  'table'       => \$table,
+  'db=s'        => \$db,
+  'logformat=s' => \$format,
+  'outdir=s'    => \$outdir,
+  'index=s'     => \$index,
+  'style=s'     => \$style,
+  'width=i'     => \$graph_w,
+  'height=i'    => \$graph_h,
+  'title=s'     => \$title
+) or pod2usage( 2 );
+
+pod2usage( 1 ) if $help;
+pod2usage( -exitstatus => 0, -verbose => 2 ) if $man;
+pod2usage( 2 ) unless @ARGV;    # Need some files
+
+# Build regexes to match extensions, URI prefixes
+handle_multi_arg(
+  \@ext, qw( mp3 mp4 m4a m4b m4p
+   m4u m4v mpeg mpg mpe mxu mov aac ogg wma asx pdf )
+);
+my $ext = '\.(' . join( '|', map quotemeta, @ext ) . ')$';
+handle_multi_arg( \@okpath, qw( / ) );
+my $okpath = '^(' . join( '|', map quotemeta, @okpath ) . ')';
+
+# Build a hash with feed paths as keys
+my %feed = ();
+@feed{ map strip_url( $_ ), @feed } = @feed;
+
+# Get the log file decoder
+my $decoder = $LOGFORMAT{ lc( $format ) }
+ || die( "Undefined log format: $format\n" );
+
+if ( $csv ) {
+
+  # We test for -csv first because if you specify -filter /and/ -csv
+  # it makes sense to produce CSV output.
+  filter_csv( @ARGV );
+}
+elsif ( $filter ) {
+  filter( @ARGV );
+}
+else {
+
+  # Read the templates
+  read_templates( \%template );
+
+  # Process logs
+  $showdb = load_db( $db )
+   if defined $db && -r $db;
+
+  scan( @ARGV );    # Scan the log files
+
+  unless ( %log ) {
+    print STDERR
+     "Can't make the report: no matching log lines found.\n";
+    exit( 0 );
+  }
+
+  process();        # Analyse the log files
+  report();         # Generate the report
+
+  save_db( $db, $showdb )
+   if defined $db;
+}
+
+# Open a file optionally expanding it if it's gzip encoded
+sub open_and_expand {
+  my $f  = shift;
+  my $fh = undef;
+  if ( $f =~ /\.gz$/ ) {
+    open( $fh, "-|", @GZIP, $f ) or die "Can't expand $f ($!)\n";
+  }
+  else {
+    open( $fh, "<", $f ) or die "Can't read $f ($!)\n";
+  }
+  return $fh;
+}
+
+# Recursively visit all the files in a directory. Pretty much the same
+# as File::Find but it's so pretty I can't bear to part with it :)
+sub visit(&@) {
+  my $cr = shift;
+  while ( my $f = shift ) {
+    if ( -d $f ) {
+      local *D;
+      opendir D, $f or die "Can't read $f ($!)\n";
+      my @f = readdir D;
+      closedir D;
+      &visit( $cr, map catfile( $f, $_ ), grep $_ !~ /^\./, @f );
+    }
+    else {
+      local $_ = $f;
+      $cr->();
+    }
+  }
+}
+
+sub status_type {
+  return $STATUS{ $_[0] } || undef;
+}
+
+sub path_type {
+  return 'feed'
+   if exists $feed{ $_[0] };
+  return 'media'
+   if $_[0] =~ m!$ext!io
+     && $_[0] =~ m!$okpath!io;
+  return undef;
+}
+
+# Process interesting log lines through the supplied sub and return a
+# list containing (<number of lines>, <number of unrecognised lines>)
+sub with_log(&$) {
+  my ( $cb, $fn ) = @_;
+  my $lf = open_and_expand( $fn );
+  my ( $lc, $ok ) = ( 0, 0 );
+  while ( <$lf> ) {
+    chomp;
+    my ( $time, $host, $method, $path, $status, $size, $agent )
+     = $decoder->( $_ );
+    $lc++;
+
+    next unless defined $time;
+    $ok++;
+
+    next unless $method eq 'GET';
+    next unless $status >= 200 && $status < 300;
+
+    $path =~ s!^https?://[^/]+!!ig;    # Strip http://example.com
+    $path =~ s!%([0-9a-f]{2})! chr(hex($1)) !ieg;    # Unescape
+    $path =~ s!\\!/!g;    # Transform backslashes
+    $path =~ s!/+!/!g;    # Remove multiple slashes
+
+    my $type = path_type( $path );
+    $cb->( $time, $host, $method, $path, $status, $size, $agent, $type )
+     if defined $type;
+  }
+  close $lf;
+  return ( $lc, $lc - $ok );
+}
+
+sub filter {
+  visit {
+    with_log {
+      print "$_\n";
+    }
+    $_;
+  }
+  @_;
+}
+
+sub filter_csv {
+  print csv( qw(time host method path status size agent type) ), "\n";
+  visit {
+    with_log {
+      print csv( @_ ), "\n";
+    }
+    $_;
+  }
+  @_;
+}
+
+sub scan {
+  visit {
+    my $f = $_;
+    my ( $lc, $bad ) = with_log {
+      my ( $time, $host, $method, $path, $status, $size, $agent, $type )
+       = @_;
+      my $key = defined( $agent ) ? "$host\t$agent" : $host;
+
+      # Attempt IP to country mapping
+      my $country = undef;
+      if ( defined( $gi ) ) {
+        unless ( exists $cache{$host} ) {
+          $cache{$host} = $gi->country_name_by_addr( $host )
+           || '(unknown)';
+        }
+        $country = $cache{$host};
+      }
+
+      my $day = day( $time );
+
+      # Record bandwidth by day
+      $bytes{$day} += $size
+       unless $size eq '-';
+
+      if ( $type eq 'media' ) {
+
+        # When we get a 200 status we take the opportunity to
+        # try and work out how big the file is so we can then
+        # piece together 206 request by summing their size until
+        # it exceeds the actual size. This relies on having seen
+        # at least one 200 request for each media file. This is
+        # rarely a problem in practice.
+        $sizes{$path}->{$size}++
+         if status_type( $status ) eq 'full';
+
+        # Record the item
+        push @{ $log{$path}->{$key} },
+         [ $time, $status, $size, $country, $agent ];
+      }
+      elsif ( $type eq 'feed' ) {
+
+        # Do something with feeds
+        $feedhit{$path}->{$day}->{$key}++;
+        $feedtot{$path}++;
+        $feedfirst{$key} = min( $feedfirst{$key}, $time );
+      }
+    }
+    $f;
+
+    if ( $bad ) {
+      if ( $bad == $lc ) {
+        print STDERR "None of the "
+         . plural( $bad, 'line' )
+         . " in the log file were recognised.\n"
+         . "That probably means either that you have not selected the correct logformat\n"
+         . "for your log files or that they are in an unsupported format.\n";
+      }
+      else {
+        print STDERR "$f: "
+         . plural( $bad, 'line' )
+         . " out of a total of $lc not recognised.\n";
+        print STDERR
+         "Are you sure you have selected the correct logformat for this file?\n"
+         if $bad > $lc / 2;
+      }
+    }
+  }
+  @_;
+}
+
+# Process the recorded log items into %byday, %bycty, %byagt
+sub process {
+
+  # Work out the probable sizes of the shows
+  for my $path ( keys %sizes ) {
+    my @sz
+     = sort { $sizes{$path}->{$b} <=> $sizes{$path}->{$a} || $a <=> $b }
+     keys %{ $sizes{$path} };
+    if ( @sz ) {
+      $size{$path} = $sz[0];
+      if ( @sz > 1 ) {
+        my ( $f0, $f1 )
+         = ( $sizes{$path}->{ $sz[0] }, $sizes{$path}->{ $sz[1] } );
+        if ( $f1 > $f0 / 2 ) {
+          print STDERR "Warning: the length of $path may not "
+           . "have been calculated correctly.\nThis can happen if "
+           . "there have been very few downloads and those downloads\n"
+           . "have varied in size. Here are the two most common sizes:\n";
+          print STDERR sprintf( "%12ld : %7ld\n", $sz[0], $f0 );
+          print STDERR sprintf( "%12ld : %7ld\n", $sz[1], $f1 );
+          print STDERR
+           "The report will be compiled on the assumption that "
+           . "the file size is $sz[0].\n";
+        }
+      }
+    }
+  }
+
+  my %badstatus = ();
+  for my $path ( keys %log ) {
+    my $waste = 0;
+    if ( exists( $size{$path} ) ) {
+      for my $key ( keys %{ $log{$path} } ) {
+        my $got   = 0;       # Amount fetched so far
+        my $start = undef;
+        for my $row ( sort { $a->[0] <=> $b->[0] }
+          @{ $log{$path}->{$key} } ) {
+          if ( $row->[2] eq '-' ) {
+
+            # Don't know length; can't do anything sensible
+            $waste++;
+          }
+          else {
+            my $st = status_type( $row->[1] );
+            if ( $st eq 'full' ) {
+              if ( $row->[2] >= $size{$path} ) {
+                request( $path, day( $row->[0] ),
+                  $row->[3], $row->[4],
+                  is_from_feed( $key, $row->[0] ) );
+              }
+              else {
+                $waste++;
+              }
+            }
+            elsif ( $st eq 'partial' ) {
+              $start = $row->[0]
+               unless defined $start;
+              $got += $row->[2];
+              if ( $got >= $size{$path} ) {
+                request( $path, day( $start ),
+                  $row->[3], $row->[4], is_from_feed( $key, $start ) );
+                $got -= $size{$path};
+                $start = undef;
+              }
+            }
+            else {
+
+              # Report any status codes we don't understand
+              $badstatus{ $row->[1] }++;
+            }
+          }
+        }
+        $waste += $got / $size{$path}
+         if $size{$path};
+      }
+    }
+    else {
+      print STDERR "Length unknown for $path\n";
+      $waste += scalar keys %{ $log{$path} };
+    }
+
+    # Record the number of wasted requests
+    $waste{$path} = $waste;
+    $waste{$ALL} += $waste;
+  }
+
+  # Slight kludge - calculate the total size of all downloads and
+  # adjust the show size for $ALL so that $total{$ALL} * $size{$ALL}
+  # will return the right value
+
+  my $tsz = 0;
+  for ( keys %total ) {
+    $tsz += $total{$_} * $size{$_}
+     unless $_ eq $ALL;
+  }
+  $size{$ALL} = $tsz / $total{$ALL};
+
+  if ( %badstatus ) {
+    my $bs = join( ', ', sort { $a <=> $b } keys %badstatus );
+    my $gs = join( ', ', sort { $a <=> $b } keys %STATUS );
+    print STDERR
+     "In addition to $gs a number of 2xx status codes ($bs) "
+     . "that podalyzer does not understand were found\n";
+  }
+}
+
+sub report {
+  my %global = (
+    STYLE   => $style,
+    VERSION => $VERSION,
+    NAME    => $NAME,
+    HOME    => $HOME,
+    DATE    => fmt_date( time() )
+  );
+
+  my %ctx = (
+    TITLE  => $title,
+    REPORT => '',
+    GRAPHS => ''
+  );
+
+  mkpath( $outdir );
+
+  # Need to generate our own stylesheet?
+  unless ( defined( $style ) ) {
+    $global{STYLE} = 'style.css';
+    make_page( obj_name( $global{STYLE} ), 'style', \%ctx, \%global );
+  }
+
+  $ctx{REPORT} .= "<h2>Show Reports</h2>\n";
+
+  $ctx{REPORT}
+   .= "<table>\n"
+   . "<tr><th>Show</th><th>Downloads</th><th>Uncounted</th><th>% Uncounted</th>"
+   . "<th>First Seen</th><th>Last Seen</th>"
+   . "<th>Days</th><th>File Size</th><th>Total Size</th></tr>\n";
+
+  for my $path ( sort all_first keys %first ) {
+    my $link = report_for_obj( $path, %global );
+    my $days = int( ( $last{$path} - $first{$path} ) / $DAY ) + 1;
+    my $waste = int( $waste{$path} || 0 );
+    my $pcw = 100 * $waste / ( $total{$path} + $waste );
+    $ctx{REPORT}
+     .= "<tr>" . "<td>"
+     . encode_entities( show_name( $path ) )
+     . " (<a href=\"$link\">report</a>)</td>"
+     . "<td align=\"right\">"
+     . $total{$path} . "</td>"
+     . "<td align=\"right\">"
+     . $waste . "</td>"
+     . "<td align=\"right\">"
+     . sprintf( "%.2f%%", $pcw ) . "</td>"
+     . "<td align=\"right\">"
+     . fmt_date( $first{$path} ) . "</td>"
+     . "<td align=\"right\">"
+     . fmt_date( $last{$path} ) . "</td>"
+     . "<td align=\"right\">$days</td>";
+    if ( $path eq $ALL ) {
+      $ctx{REPORT} .= "<td align=\"center\"><i>N/A</i></td>";
+    }
+    else {
+      $ctx{REPORT}
+       .= "<td align=\"right\">" . fmt_size( $size{$path} ) . "</td>";
+    }
+    $ctx{REPORT}
+     .= "<td align=\"right\">"
+     . fmt_size( $size{$path} * $total{$path} )
+     . "</td></tr>\n";
+  }
+
+  $ctx{REPORT}
+   .= "<tr><td colspan=\"9\">"
+   . $template{caption}
+   . "</td></tr></table>\n";
+
+  my @fr = sort keys %feedhit;
+  if ( @fr ) {
+    $ctx{REPORT} .= "<h2>Feed Reports</h2>\n";
+    $ctx{REPORT}
+     .= "<table>\n" . "<tr><th>Feed</th><th>Hits</th></tr>\n";
+    for my $feed ( @fr ) {
+      my $link = report_for_feed( $feed, %global );
+      $ctx{REPORT}
+       .= "<tr>" . "<td>"
+       . encode_entities( feed_name( $feed ) )
+       . " (<a href=\"$link\">report</a>)</td>"
+       . "<td align=\"right\">"
+       . $feedtot{$feed} . "</td>"
+       . "</tr>\n";
+    }
+
+    $ctx{REPORT} .= "</table>\n";
+  }
+
+  my %freq = ();
+  bump_freq_hash( \%freq, $feedhit{$_} ) for keys %feedhit;
+
+  $ctx{GRAPHS} .= "<h2>Overall Analysis</h2>\n";
+
+  $ctx{GRAPHS} .= time_series_line( $ALL, 'Downloads by Day',
+    'Downloads', $byday{$ALL} );
+  $ctx{GRAPHS}
+   .= pie_chart( $ALL, 'Downloads by Country', $bycty{$ALL} )
+   if defined $gi;
+
+  #$ctx{GRAPHS} .= pie_chart($ALL, 'Downloads by Client', $byagt{$ALL});
+  $ctx{GRAPHS} .= time_series_line( $ALL, 'Bandwidth by Day',
+    'Bandwidth', \%bytes, \&fmt_size, \&tidy_log_scale_bin );
+  $ctx{GRAPHS} .= bar_graph( 20 );
+  $ctx{GRAPHS} .= time_series_line( 'All Feeds', 'Subscribers by Day',
+    'Subscribers', \%freq );
+
+  if ( @fr ) {
+    $ctx{GRAPHS}
+     .= time_series_line( 'From Feeds', '% Downloads from Subscribers',
+      '% Downloads', percent_hash( $byday{$ALL}, \%fromfeed ) );
+  }
+
+  my $exp = "<br />\n<small>(in descending bandwidth order)</small>";
+  $ctx{GRAPHS} .= make_table(
+    'Bandwidth by Week' . $exp,
+    quantize_hash( \%bytes, \&week ),
+    headers     => [ 'Date', 'Bandwidth' ],
+    keyformat   => \&fmt_date,
+    valueformat => \&fmt_size
+  );
+
+  $ctx{GRAPHS} .= make_table(
+    'Bandwidth by Month' . $exp,
+    quantize_hash( \%bytes, \&month ),
+    headers     => [ 'Date', 'Bandwidth' ],
+    keyformat   => \&fmt_month,
+    valueformat => \&fmt_size
+  );
+
+  $ctx{GRAPHS} .= br_clear();
+
+  make_page( obj_name( $index ), 'main', \%ctx, \%global );
+}
+
+sub percent_hash {
+  my ( $th, $fh ) = @_;
+  my $nh = {};
+  for ( keys %{$th} ) {
+    if ( $th->{$_} ) {
+      $nh->{$_} = 100 * ( $fh->{$_} || 0 ) / $th->{$_};
+    }
+    else {
+      $nh->{$_} = 0;
+    }
+  }
+
+  return $nh;
+}
+
+sub report_for_obj {
+  my ( $path, %global ) = @_;
+
+  my $back = "<p><a href=\"$index\">Back to Summary</a></p>\n";
+
+  my %ctx = (
+    TITLE  => "$title: " . show_name( $path ),
+    REPORT => '',
+    GRAPHS => ''
+  );
+
+  my $of = obj_name( $index, $path );
+
+  $ctx{REPORT} .= "<h2>Report</h2>\n";
+  $ctx{REPORT} .= $back;
+
+  $ctx{REPORT} .= "<p>" . fmt_detail( $path ) . "</p>\n";
+  $ctx{REPORT} .= $back;
+
+  $ctx{GRAPHS} .= "<h2>Analysis</h2>\n";
+  $ctx{GRAPHS} .= $back;
+  $ctx{GRAPHS} .= time_series_line(
+    show_name( $path ), 'Downloads by Day',
+    'Downloads',        $byday{$path}
+  );
+  $ctx{GRAPHS} .= pie_chart(
+    show_name( $path ),
+    'Downloads by Country',
+    $bycty{$path}
+  ) if defined $gi;
+
+#$ctx{GRAPHS} .= pie_chart(show_name($path), 'Downloads by Client', $byagt{$path});
+  $ctx{GRAPHS} .= make_table( 'Downloads by Country',
+    $bycty{$path}, headers => [ 'Country', 'Downloads' ] );
+  $ctx{GRAPHS} .= br_clear();
+  $ctx{GRAPHS} .= $back;
+
+  make_page( $of, 'main', \%ctx, \%global );
+
+  return $of;
+}
+
+sub report_for_feed {
+  my ( $feed, %global ) = @_;
+
+  my $back = "<p><a href=\"$index\">Back to Summary</a></p>\n";
+
+  my %ctx = (
+    TITLE  => "$title: " . feed_name( $feed ),
+    REPORT => '',
+    GRAPHS => ''
+  );
+
+  # Build frequency table
+  my %freq = ();
+  bump_freq_hash( \%freq, $feedhit{$feed} );
+
+  my $of = obj_name( $index, $feed );
+
+  $ctx{REPORT} .= "<h2>Report</h2>\n";
+  $ctx{REPORT} .= $back;
+  $ctx{REPORT} .= $template{subscribers};
+
+  $ctx{GRAPHS} .= $back;
+  $ctx{GRAPHS} .= "<h2>Analysis</h2>\n";
+  $ctx{GRAPHS} .= time_series_line(
+    feed_name( $feed ),
+    'Subscribers by Day',
+    'Subscribers', \%freq
+  );
+
+  $ctx{GRAPHS} .= $back;
+
+  make_page( $of, 'main', \%ctx, \%global );
+
+  return $of;
+}
+
+sub br_clear {
+  return "<br clear=\"both\" />\n";
+}
+
+sub bump_freq_hash {
+  my ( $fh, $nh ) = @_;
+  for ( keys %{$nh} ) {
+    $fh->{$_} += scalar keys %{ $nh->{$_} };
+  }
+}
+
+# Quantize a time to the nearest day
+sub day {
+  return int( $_[0] / $DAY ) * $DAY;
+}
+
+# Quantize a time to the nearest week
+sub week {
+  my ( $s, $m, $h, $md, $mo, $y, $wd, $yd ) = gmtime( $_[0] );
+  return timegm( 0, 0, 0, $md, $mo, $y ) - $wd * $DAY;
+}
+
+# Quantize a time to the nearest month
+sub month {
+  my ( $s, $m, $h, $md, $mo, $y, $wd, $yd ) = gmtime( $_[0] );
+  return timegm( 0, 0, 0, 1, $mo, $y );
+}
+
+sub is_from_feed {
+  my ( $key, $time ) = @_;
+  return exists $feedfirst{$key}
+   && $feedfirst{$key} <= $time;
+}
+
+sub quantize_hash {
+  my ( $hr, $qf ) = @_;
+  my $nh = {};
+  for ( keys %{$hr} ) {
+    $nh->{ $qf->( $_ ) } += $hr->{$_};
+  }
+  return $nh;
+}
+
+sub all_first {
+  return 0  if $a eq $b;
+  return -1 if $a eq $ALL;
+  return 1  if $b eq $ALL;
+  return $first{$a} <=> $first{$b};
+}
+
+sub make_table {
+  my $title = shift;
+  my $hr    = shift;
+  my %args  = @_;
+
+  my $hdrs = $args{headers}     || [];
+  my $kfmt = $args{keyformat}   || sub { return $_[0] };
+  my $vfmt = $args{valueformat} || sub { return $_[0] };
+
+  my @keys = sort { $hr->{$b} <=> $hr->{$a} } keys %{$hr};
+
+  return ''
+   unless @keys;
+
+  my $tot = 0;
+  $tot += $hr->{$_} for @keys;
+
+  my $tbl
+   = "<div class=\"floater\"><table>\n<caption>$title</caption>\n";
+
+  $tbl
+   .= "<tr><th>"
+   . ( $hdrs->[0] || 'Item' ) . "</th>" . "<th>"
+   . ( $hdrs->[1] || 'Count' ) . "</th>" . "<th>"
+   . ( $hdrs->[2] || '%' )
+   . "</th></tr>\n";
+
+  for ( @keys ) {
+    $tbl .= "<tr>";
+    $tbl .= "<td align=\"right\">"
+     . encode_entities( $kfmt->( $_ ) ) . "</td>";
+    $tbl .= "<td align=\"right\">"
+     . encode_entities( $vfmt->( $hr->{$_} ) ) . "</td>";
+    my $pc = $hr->{$_} * 100 / $tot;
+    $tbl .= "<td align=\"right\">" . sprintf( '%.2f%%', $pc ) . "</td>";
+    $tbl .= "</tr>\n";
+  }
+
+  $tbl .= "<tr>";
+  $tbl .= "<td><b>Total</b></td>";
+  $tbl
+   .= "<td align=\"right\"><b>"
+   . encode_entities( $vfmt->( $tot ) )
+   . "</b></td>";
+  $tbl .= "<td align=\"right\"></td>";
+  $tbl .= "</tr>\n";
+
+  $tbl .= "</table></div>\n";
+  return $tbl;
+
+}
+
+sub clip_hash {
+  my ( $hr, $min, $others ) = @_;
+  my $tot = 0;
+  $tot += $_ for values %{$hr};
+  my $r = {};
+  for ( keys %{$hr} ) {
+    if ( $hr->{$_} < $tot * $min ) {
+      $r->{$others} += $hr->{$_};
+    }
+    else {
+      $r->{$_} = $hr->{$_};
+    }
+  }
+  return $r;
+}
+
+sub pie_chart {
+  my ( $obj, $title, $hr ) = @_;
+  my @data;
+  $hr = clip_hash( $hr, 0.03, 'Others' );
+  for ( sort { $hr->{$b} <=> $hr->{$a} } keys %{$hr} ) {
+    push @{ $data[0] }, $_;
+    push @{ $data[1] }, $hr->{$_};
+  }
+
+  return ''
+   unless @data;
+
+  my $graph = GD::Graph::pie->new( $graph_w, $graph_h );
+  $graph->set(
+    title       => $title,
+    show_values => 1
+  );
+
+  my $gd = $graph->plot( \@data ) or die $graph->error;
+  return make_graph( $obj, $title, $graph, $gd );
+}
+
+sub bar_graph {
+  my ( $limit ) = @_;
+
+  my ( @data, $max );
+
+  my ( $obj, $title ) = ( '', 'Downloads by Show' );
+
+  my @keys = sort all_first keys %first;
+  shift @keys;    # Remove 'all'
+
+  # Limit to the last $limit shows
+  if ( defined( $limit ) && @keys > $limit ) {
+    my $excess = @keys - $limit;
+    splice @keys, 0, $excess;
+  }
+
+  return ''
+   unless @keys;
+
+  for my $path ( @keys ) {
+    push @{ $data[0] }, show_name( $path, 15 );
+    push @{ $data[1] }, $total{$path};
+    $max = max( $total{$path}, $max );
+  }
+
+  $max = tidy_log_scale( $max );
+  my $graph = GD::Graph::bars->new( $graph_w, $graph_h );
+  $graph->set(
+    x_label           => 'Show',
+    y_label           => 'Downloads',
+    title             => $title,
+    x_labels_vertical => 1,
+    y_max_value       => $max
+  ) or die $graph->error;
+  my $gd = $graph->plot( \@data ) or die $graph->error;
+  return make_graph( $obj, $title, $graph, $gd );
+}
+
+sub time_series_line {
+  my ( $obj, $title, $yaxis, $hr, $yfmt, $scaler, $cutoff ) = @_;
+  my @ra = sort { $a <=> $b } keys %{$hr};
+  return ''
+   unless @ra > 1;
+  my $st = max( $cutoff, $ra[0] );
+  my $et = $ra[-1];
+  my ( @data, $max );
+
+  # Kludge the number of points to make the graph
+  # ticks format nicely.
+  my $pts = int( ( $et - $st ) / $DAY + 1 );
+  my $lbls = min( $pts, max( 2, int( $graph_w / 20 ) ) );
+  my $skip = max( 1, int( $pts / $lbls ) );
+  $pts = int( ( $pts + $skip - 1 ) / $skip ) * $skip;
+  for ( my $p = 0; $p <= $pts; $p++ ) {
+    my $d = $st + $DAY * $p;
+    $data[0]->[$p] = fmt_date( $d );
+    $data[1]->[$p] = $hr->{$d};
+    $max = max( $hr->{$d}, $max );
+  }
+
+  $scaler = \&tidy_log_scale
+   unless defined( $scaler );
+
+  $max = $scaler->( $max );
+
+  my $graph = GD::Graph::lines->new( $graph_w, $graph_h );
+  $graph->set(
+    x_label           => 'Date',
+    y_label           => $yaxis,
+    title             => $title,
+    x_labels_vertical => 1,
+    x_label_skip      => $skip,
+    y_max_value       => $max,
+    y_tick_number     => 10,
+    y_label_skip      => 2,
+    y_number_format   => ( $yfmt || '%ld' ),
+    line_width        => 2
+  ) or die $graph->error;
+  my $gd = $graph->plot( \@data ) or die $graph->error;
+  return make_graph( $obj, $title, $graph, $gd );
+}
+
+sub make_graph {
+  my ( $obj, $title, $graph, $gd ) = @_;
+  local *I;
+  my $ext = $graph->export_format;
+  my $img = obj_name( $index, "$obj/$title", $ext );
+  my $f   = catfile( $outdir, $img );
+  open I, ">$f" or die "Can't write $f ($!)\n";
+  binmode I;
+  print I $gd->$ext();
+  close I;
+  my ( $w, $h ) = $gd->getBounds();
+  return img( $img, $w, $h, $title );
+}
+
+# Create the markup for an HTML IMG tag
+sub img {
+  my ( $src, $width, $height, $alt ) = @_;
+  return
+   "<img src=\"$src\" width=\"$width\" height=\"$height\" alt=\""
+   . encode_entities( $alt ) . "\" />";
+}
+
+# Make a page in the report from the specified template.
+sub make_page {
+  my ( $f, $t, $ctx, $global ) = @_;
+  my $tpl = $template{$t} or die "Template $t not defined\n";
+  local *F;
+
+  # Lookup substition
+  my $gv = sub {
+    my $key = shift;
+    return $ctx->{$key}
+     if exists $ctx->{$key};
+    return $global->{$key}
+     if exists $global->{$key};
+    die "Key $key not defined by context\n";
+  };
+
+  # Substitute from the context into the template
+  $tpl =~ s/ % (\w+) % / $gv->($1) /exg;
+  $f = catfile( $outdir, $f );
+  open F, ">$f" or die "Can't write $f ($!)\n";
+  binmode F, ':utf8';
+  print F $tpl;
+  close F;
+}
+
+sub obj_name {
+  my ( $base, $obj, $ext ) = @_;
+  my ( $ba, $ex );
+  if ( $base =~ /^(.+?)(\.[^\.]+)$/ ) {
+    ( $ba, $ex ) = ( $1, $2 );
+  }
+  else {
+    ( $ba, $ex ) = ( $base, '.html' );
+  }
+
+  # Append cleaned up object name
+  if ( defined( $obj ) ) {
+    $obj =~ s!%([0-9a-f]{2})! chr(hex($1)) !ieg;
+    $obj =~ s!\W+!_!g;
+    $obj = "_$obj";
+    $obj =~ s/_+/_/g;
+    $ba .= $obj;
+  }
+
+  # Use supplied extension
+  if ( defined( $ext ) ) {
+    $ext = ".$ext"
+     unless $ext =~ /^\./;
+    $ex = $ext;
+  }
+
+  return $ba . $ex;
+}
+
+sub request {
+  my ( $path, $day, $country, $agent, $feed ) = @_;
+
+  # Log the request twice: once for this $path (the path of the object
+  # on the server) and once for the $ALL path ($ALL being the
+  # psuedonym for the 'all downloads' category)
+  logrequest( $path, $day, $country, $agent, $feed );
+  logrequest( $ALL,  $day, $country, $agent, $feed );
+
+  $fromfeed{$day}++
+   if $feed;
+}
+
+sub logrequest {
+  my ( $path, $day, $country, $agent, $feed ) = @_;
+  $first{$path} = min( $first{$path}, $day );
+  $last{$path} = max( $last{$path}, $day );
+  $total{$path}++;
+  $byday{$path}->{$day}++;
+  $bycty{$path}->{$country}++
+   if defined $country;
+  $byagt{$path}->{$agent}++
+   if defined $agent;
+}
+
+sub plural {
+  my ( $n, $sing, $plur ) = @_;
+  return ( $n == 1 ) ? "$n $sing" : "$n " . ( $plur || $sing . 's' );
+}
+
+sub fmt_range {
+  my ( $first, $last ) = @_;
+  my $days = int( ( $last - $first ) / $DAY ) + 1;
+  if ( $days == 1 ) {
+    return 'on ' . fmt_date( $first );
+  }
+  else {
+    return
+       "over $days days from "
+     . fmt_date( $first ) . " to "
+     . fmt_date( $last );
+  }
+}
+
+sub fmt_detail {
+  my ( $path ) = @_;
+  my $detail = plural( $total{$path}, 'download' );
+  if ( exists( $waste{$path} ) ) {
+    $detail .= ' (and '
+     . plural( int( $waste{$path} ), 'uncounted download' ) . ')';
+  }
+  $detail .= ' ' . fmt_range( $first{$path}, $last{$path} );
+  if ( $path ne $ALL ) {
+    $detail .= '. File size: ' . fmt_size( $size{$path} );
+    $detail .= ', t';
+  }
+  else {
+    $detail .= '. T';
+  }
+  $detail .= 'otal size of downloads: '
+   . fmt_size( $size{$path} * $total{$path} ) . '.';
+  return $detail;
+}
+
+sub fmt_month {
+  my ( $d ) = @_;
+  my ( $s, $m, $h, $md, $mo, $y, $wd, $yd ) = gmtime( $d );
+  return strftime( '%b %Y', $s, $m, $h, $md, $mo, $y );
+}
+
+sub fmt_date {
+  my ( $d ) = @_;
+  my ( $s, $m, $h, $md, $mo, $y, $wd, $yd ) = gmtime( $d );
+  return strftime( '%e %b %Y', $s, $m, $h, $md, $mo, $y );
+}
+
+sub fmt_size {
+  my $sz = shift;
+  if ( $sz > $TB * 5 ) {
+    return sprintf( "%.2fTb", $sz / $TB );
+  }
+  elsif ( $sz > $GB * 5 ) {
+    return sprintf( "%.2fGb", $sz / $GB );
+  }
+  elsif ( $sz > $MB * 5 ) {
+    return sprintf( "%.2fMb", $sz / $MB );
+  }
+  elsif ( $sz > $KB * 5 ) {
+    return sprintf( "%.2fKb", $sz / $KB );
+  }
+  else {
+    return sprintf( "%db", $sz );
+  }
+}
+
+sub max {
+  my $m = undef;
+  for ( @_ ) {
+    $m = $_ if defined $_ && ( !defined $m || $m < $_ );
+  }
+  return $m;
+}
+
+sub min {
+  my $m = undef;
+  for ( @_ ) {
+    $m = $_ if defined $_ && ( !defined $m || $m > $_ );
+  }
+  return $m;
+}
+
+# Turn parsed time from a logfile into UNIX time
+sub logtime {
+  my ( $day, $month, $year, $hour, $min, $sec, $offset ) = @_;
+  return undef unless exists $MON{$month};
+  return timegm( $sec, $min, $hour, $day, $MON{$month}, $year );
+}
+
+sub read_templates {
+  my $hr  = shift;
+  my $obj = undef;
+  while ( <DATA> ) {
+    chomp;
+    last if $_ eq '__END__';
+    if ( /^{(\w+)}$/ ) {
+      $obj = $1;
+    }
+    else {
+      die "Junk before template marker\n"
+       unless defined $obj;
+      $hr->{$obj} .= "$_\n";
+    }
+  }
+}
+
+# Load the show name database
+sub load_db {
+  my ( $db ) = @_;
+  my $dict = {};
+  local *DB;
+  open DB, "<$db" or die "Can't read $db ($!)\n";
+  binmode DB, ":utf8";
+  while ( <DB> ) {
+    chomp;
+    next unless /^(\S+)\s+(.+)$/;
+    $dict->{$1} = $2;
+  }
+  close DB;
+  return $dict;
+}
+
+# Save the show name database
+sub save_db {
+  my ( $db, $dict ) = @_;
+  local *DB;
+  open DB, ">$db" or die "Can't write $db ($!)\n";
+  binmode DB, ":utf8";
+  for ( sort keys %{$dict} ) {
+    print DB "$_\t$dict->{$_}\n";
+  }
+  close DB;
+}
+
+sub tidy_trunc {
+  my ( $f, $max, $elipsis ) = @_;
+  return $f unless defined $max;
+  return $f if length( $f ) <= $max;
+  $elipsis = '...'
+   unless defined $elipsis;
+  return substr( $f, 0, $max - length( $elipsis ) ) . $elipsis;
+}
+
+sub feed_name {
+  return show_name( @_ );
+}
+
+# Lookup the name of a show
+sub show_name {
+  my ( $obj, $max ) = @_;
+  unless ( exists $showdb->{$obj} ) {
+    $showdb->{$obj} = basename( $obj );
+  }
+
+  return tidy_trunc( $showdb->{$obj}, $max );
+}
+
+sub strip_url {
+  my $url = shift;
+  $url =~ s!^http://[^/]+!!;
+  return $url;
+}
+
+# Return a value >= passed in value chosen from a sequence that makes
+# the graph axis look tidy.
+sub tidy_log_scale {
+  my $v = shift;
+  my $m = 1;
+  while ( 1 ) {
+    for my $x ( 1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 7, 8, 9 ) {
+      my $lim = $x * $m;
+      return $lim if $lim >= $v;
+    }
+    $m *= 10;
+  }
+}
+
+sub tidy_log_scale_bin {
+  my $v = shift;
+  my $m;
+  for ( $m = 1; $m < $v; $m *= 2 ) { }
+  return $m;
+}
+
+sub handle_multi_arg {
+  my ( $ar, @dflt ) = @_;
+  if ( @{$ar} ) {
+    @{$ar} = split( /,/, join( ',', @{$ar} ) );
+  }
+  else {
+    @{$ar} = @dflt;
+  }
+}
+
+# Encode args as a line of CSV
+sub csv {
+  return
+   '"' . join( '","', map { ( my $i = $_ ) =~ s/"/""/g; } @_ ) . '"';
+}
+
+__DATA__
+{main}
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<!-- Generated by %NAME% %VERSION% (%HOME%) -->
+<html>
+    <head>
+        <title>%TITLE%</title>
+        <link rel="stylesheet" href="%STYLE%" type="text/css" media="screen" />
+        <meta http-equiv="Content-Type" content="text/html;charset=utf-8" />
+    </head>
+    <body>
+        <h1>%TITLE%</h1>
+        <div class="report">
+            %REPORT%
+        </div>
+        <div class="graphs">
+            %GRAPHS%
+        </div>
+        <div class="footer">Generated by %NAME% %VERSION% on %DATE% (<a href="%HOME%">%HOME%</a>)</div>
+    </body>
+</html>
+{subscribers}
+<p>The number of subscribers for a particular day is defined as the number of unique users who fetched
+the feed during that day.</p>
+{caption}
+<table>
+    <caption>Legend</caption>
+    <tr><td valign="top" class="header"><b>Show</b></td>
+        <td valign="top">The show name.</td></tr>
+    <tr><td valign="top" class="header"><b>Downloads</b></td>
+        <td valign="top">The number of counted downloads for this show.</td></tr>
+    <tr><td valign="top" class="header"><b>Uncounted</b></td>
+        <td valign="top">The number of uncounted downloads for this show. Uncounted
+        downloads are requests in the log files that report a length too short to constitute
+        a complete download.</td></tr>
+    <tr><td valign="top" class="header"><b>% Uncounted</b></td>
+        <td valign="top">What percentage of all the hits for this show were uncounted.</td></tr>
+    <tr><td valign="top" class="header"><b>First Seen</b></td>
+        <td valign="top">Date the show was first downloaded.</td></tr>
+    <tr><td valign="top" class="header"><b>Last Seen</b></td>
+        <td valign="top">Date the show was last downloaded.</td></tr>
+    <tr><td valign="top" class="header"><b>Days</b></td>
+        <td valign="top">Number of days for which the show has been downloaded.</td></tr>
+    <tr><td valign="top" class="header"><b>File Size</b></td>
+        <td valign="top">The size of the download.</td></tr>
+    <tr><td valign="top" class="header"><b>Total Size</b></td>
+        <td valign="top">The total size of all <i>counted</i> downloads.</td></tr>
+</table>
+{style}
+/* Generated by %NAME% %VERSION% (%HOME%) */
+
+html, body {
+    margin: 10px;
+}
+
+html, body, input, textarea, select, td, th {
+    font-family: Verdana, Arial, Helvetica, Geneva;
+}
+
+h1 {
+    border-bottom: 2px solid black;
+}
+
+img {
+    border: 0;
+}
+
+div.report, div.graphs {
+    background-color: #ddddff;
+    padding: 0px 4px 0px 4px;
+    margin-bottom: 10px;
+    border: 1px solid #888888;
+    
+}
+
+div.graphs img {
+    padding: 8px;
+}
+
+div.graphs table, div.report table {
+    border: 1px solid #888888;
+    margin: 8px;
+    border-collapse: collapse;
+}
+
+div.graphs td, div.report td {
+    border: 1px solid #888888;
+    padding: 2px;
+}
+
+div.graphs th, div.report th, div.report td.header {
+    padding: 4px;
+    background-color: #bbbbdd;
+    font-weight: bold;
+    border: none;
+}
+
+div.footer {
+    color: #555555;
+    font-size: 0.8em;
+    border-top: 1px solid black;
+}
+
+div.floater {
+    float: left;
+}
+
+span.item {
+    font-weight: bold;
+}
+
+span.detail {
+    font-size: 0.9em;
+}
+__END__
+
+=head1 NAME
+
+podalyzer - Analyse weblogs and produce an HTML formatted report
+
+=head1 SYNOPSIS
+
+podalyzer [options] [file ...]
+
+
+ Options:
+
+    -title=[text]           specify the title of the report
+    -outdir=[dir]           specify the output directory for the report
+    -index=[name.html]      specify the name of the start page of the 
+                            report
+    -style=[uri]            specify the URI relative to the report 
+                            directory of the stylesheet to use
+    -extension=[ext,...]    specify the filename extension(s) to be 
+                            recognised as media files
+    -path=[path,...]        specify the paths where media files should
+                            be recognised
+    -feed=[url]             specify the URL of the feed to enable feed
+                            analysis
+    -db=[file]              name of a file to contain file path to 
+                            podcast name mappings
+    -logformat=[format]     specify the format of the log file; 
+                            currently 'common' and 'extended' are 
+                            supported
+    -width=[width]          specify the width of the graphs
+    -height=[height]        specify the height of the graphs
+    -filter                 don't produce report; instead output those
+                            lines from the log that would have been 
+                            included in the report
+    -csv                    output the matching log lines in CSV format
+    -help                   see this summary
+    -man                    see this text as a man page
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-title>
+
+Specify the title of the report. The title is included at the top of
+each page.
+
+=item B<-outdir>
+
+The destination directory for the report. If it doesn't exist it will
+be created.
+
+=item B<-index>
+
+Specify the name of the starting page of the report. All other pages and
+images in the report will have names based on this name in such a way
+that multiple reports can be generated in the same directory without
+clobbering each other's files.
+
+=item B<-style>
+
+Specify the URI relative to the report directory of a stylesheet to be
+used for the report. If no stylesheet is named here a default stylesheet
+(called style.css) will be generated in the output directory.
+
+=item B<-extension>
+
+By default B<podalyzer> recognises a number of common extensions that
+are used for media files. Specifically:
+
+    mp3 mp4 m4a m4b m4p m4u m4v mpeg mpg mpe mxu mov aac ogg wma asx pdf
+
+If you have files with extensions not in this list that you wish to have
+included in the report you should name I<all> of the extensions you are
+using like this:
+
+    podalyzer -extension=mp2,wav,au
+
+Note that the first use of B<-extension> overrides the built in list
+so you may have to name extensions that would normally be recognised
+by default.
+
+=item B<-path>
+
+Limit the files included in the report to those found in the specified
+subdirectories like this:
+
+    podalyzer -path=/media,/podcast/released
+
+If no paths are specified the report will include files in any directory
+on the server.
+
+=item B<-feed>
+
+Specify the URL of the feed(s) for any podcast(s) you are analysing. May
+be used more than once to specify multiple feeds.
+
+Specifying the feed URL enables extra functionality in Podalyzer to
+analyse the number of feed subscribers by day and the proportion of
+downloads that originate from subscribers to the feed.
+
+If using Podalyzer in filter or csv modes specify any feed URLs to have
+the feeds included in the filtered output.
+
+=item B<-db>
+
+Provide the name of a text file that records the relationship between
+filenames on the server (such as F</media/podcast001.mp3>) and the name
+of the show they correspond to (such as 'Brand New Podcast Show 1'). By
+default B<podalyzer> will make up a show name based on the filename (it
+would choose 'podcast001.mp3' in the example above). If you wish you can
+maintain a file that lists the correspondance between filenames and show
+names, for example:
+
+    /media/podcast001.mp3   Brand New Podcast Show 1
+    /media/podcast002.mp3   Podcast 2 from me
+    /media/podcast003.mp3   podcast003.mp3
+
+Each time podalyzer runs it will add to this file any missing entries
+corresponding to media files it has not seen before. The third entry in
+the example above has been generated in this way. To have podcast003.mp3
+correctly named in the report either edit the database file to correct
+the name or use B<podfeeder> to create mappings automatically.
+
+=item B<-logformat>
+
+Tell B<podalyzer> what format to expect the raw logfiles in. Currently
+'common' and 'extended' are supported - corresponding to Common Log
+Format and Extended Common Log format respectively. If you have logs in
+a format that isn't supported please provide a representative sample to
+me (andy@hexten.net) and I'll add support for it.
+
+=item B<-width>
+
+Set the width of generated graphs. Defaults to 400.
+
+=item B<-height>
+
+Set the height of generated graphs. Defaults to 300.
+
+=item B<-filter>
+
+Instead of producing a report output the lines from the input log files
+that would have been processed. Can be used to produce filtered log
+files that contain only interesting data.
+
+=item B<-csv>
+
+Instead of producing a report output the lines that would have been
+processed as a CSV file.
+=back
+
+=head1 DESCRIPTION
+
+B<podalyzer> scans one or more web server log files, extracts entries
+that result from downloads of media files (typically podcasts) and
+generates a report based on those entries. In addition to reporting the
+number and size of downloaded files it generates a number of graphs
+showing downloads over time, downloads per 'show' and (if the Geo::IP
+module is installed) a breakdown by country.
+
+
+The names of one or more log files are passed on the command line. Any
+directories named on the command line will be recursively searched. Note
+that if the directory or any of its sub-directories contain non-log
+files B<podalyzer> will attempt to process them too. If any files named
+on the command line have the extension B<gz> podalyzer will attempt to
+expand them using the command B<gzip -cd> I<filename>. If this command
+is not available on your system attempts to expand gzip compressed log
+files will fail.
+
+The B<-path> and B<-extension> options allow fine control over the
+request URIs that are included in the report. The B<-db> option allows a
+'database' (actually a regular text file) to be named that will provide
+mapping between request URIs (such as F</media/podcast001.mp3>) and show
+names (such as 'My Podcast Show 1'). The B<podfeeder> program (which
+should have been distributed with this program) allows a show mapping
+database to be generated from an RSS feed.
+
+
+When the B<-filter> option is specified podalyzer outputs any lines from
+the input log file that match the criteria specified with B<-path> and
+B<-extension> - in effect producing a new log file containing only lines
+of interest to podalyzer. This is useful in situations where the logs
+contain a large number of entries that are not interesting to podalyzer.
+Assuming the logs are rotated regularly, B<podalyzer -filter> may be
+used to maintain a directory of filtered log files containing only the
+interesting lines from the (potentially huge) original logs. As
+podalyzer must rescan all the relevant log files each times it runs this
+can greatly speed up processing.
+
+
+=head1 EXAMPLES
+
+A shell script that uses podalyser in filter mode to maintain a
+directory of podcast specific log files and then runs podalyser in
+normal report generation mode to produce a report from those logs:
+
+
+    #!/bin/sh
+
+    podalyzer=/root/bin/podalyzer
+    podfeeder=/root/bin/podfeeder
+
+    feed=http://example.com/category/podcasts/feed
+    title='My Podcast'
+
+    webroot=/usr/local/apache-php
+    logdir=$webroot/logs
+    filtlogdir=podcasts
+
+    outdir=$webroot/htdocs/stats
+
+    cd $logdir
+    mkdir -p $filtlogdir
+
+    # Update filtered logs
+    for log in access_log*
+    do
+        # Make the name of the podcast log file
+        flog=`echo $filtlogdir/$log | sed -e 's/\.gz$//'`
+        # If the main log is newer than the podcast log
+        # or the podcast log doesn't yet exist use
+        # podalyzer in filter mode to create it
+        if [ ! -f $flog -o $log -nt $flog ]
+        then
+            $podalyzer --filter $log > $flog
+        fi
+    done
+
+    # Read feed
+    $podfeeder --db=shows.db --force $feed
+    # Generate report
+    $podalyzer --db=shows.db --outdir=$outdir --title="$title" $filtlogdir
+
+=head1 SEE ALSO
+
+podfeeder
+
+=head1 AUTHORS
+
+Written by Andy Armstrong (andy@hexten.net) with much inspiration
+from Kevin Devin (Friends in Tech). Kevin's podstats script may be
+found here:
+
+http://forums.friendsintech.com/viewtopic.php?t=\
+   40&sid=055c024f369658b97e01dd7ef282d71d
+
+(url wrapped for formatting - here is a shorter version:
+http://lyxus.net/cfv)
+
+=head1 BUGS
+
+If you find any please report them to andy@hexten.net.
+
+=cut

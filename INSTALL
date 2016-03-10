@@ -1,0 +1,88 @@
+
+Installing Podalyzer
+
+  Prerequisites
+
+   Podalyzer needs a recent version of Perl (5.8.3 or better). In
+   addition you must
+     * have a web server that produces log files in Common Log
+       File or Extended Common Log File formats
+     * have access to those log files
+     * to run Podalyzer have the following Perl modules
+       installed:
+          + [1]HTML::Entities
+          + [2]GD::Graph
+     * to have stats analysed by country have the following Perl
+       modules installed:
+          + [3]Geo::IP
+     * to run Podfeeder have the following Perl modules
+       installed:
+          + [4]XML::Parser
+          + [5]LWP::UserAgent
+
+  Install Podalyzer and Podfeeder
+
+   Download the latest version of Podalyzer from
+   [6]http://hexten.net/podalyzer/. Extract the downloaded file:
+
+     $ tar zxf podalyzer-0.1.tar.gz
+
+   Optionally you can move podalyzer and podfeeder to a
+   convenient directory on your path. That might go something
+   like this...
+
+     $ cd podalyzer-0.1
+     $ mv podalyzer podfeeder ~/bin
+
+   ...but the details will depend on your setup.
+
+  Install Perl Modules
+
+   The easiest way to install Perl modules is to use the CPAN
+   interface like this:
+
+     $ perl -MCPAN -e shell
+     cpan shell -- CPAN exploration and modules installation
+     (v1.7601)
+     ReadLine support enabled
+     cpan> install GD::Graph
+     (lots of output deleted)
+     GD::Graph is up to date.
+     cpan> install HTML::Entities
+     (lots of output deleted)
+     HTML::Entities is up to date.
+     cpan> install Geo::IP
+     (lots of output deleted)
+     Geo::IP is up to date.
+     cpan> install XML::Parser
+     (lots of output deleted)
+     XML::Parser is up to date.
+     cpan> install LWP::UserAgent
+     (lots of output deleted)
+     LWP::UserAgent is up to date.
+     cpan> exit
+
+   [7]Geo::IP is optional; if you don't install it reports will
+   not analyse downloads by country.
+
+   [8]Geo::IP, [9]GD::Graph and [10]XML::Parser all require
+   external libraries to be installed. If you don't have those
+   prerequisite libraries CPAN will fail to install the modules.
+   Please consult the documentation for those modules for more
+   information.
+
+   Once those modules have been successfully installed you should
+   be ready to run Podalyzer and Podstats.
+
+References
+
+   1. http://search.cpan.org/~gaas/HTML-Parser-3.48/lib/HTML/Entities.pm
+   2. http://search.cpan.org/~bwarfield/GDGraph-1.4306/Graph.pm
+   3. http://search.cpan.org/~rkobes/Apache-GeoIP-1.62/Apache/Geo/IP.pm
+   4. http://search.cpan.org/~msergeant/XML-Parser-2.34/Parser.pm
+   5. http://search.cpan.org/~gaas/libwww-perl-5.803/lib/LWP/UserAgent.pm
+   6. http://hexten.net/podalyzer/
+   7. http://search.cpan.org/~rkobes/Apache-GeoIP-1.62/Apache/Geo/IP.pm
+   8. http://search.cpan.org/~rkobes/Apache-GeoIP-1.62/Apache/Geo/IP.pm
+   9. http://search.cpan.org/~bwarfield/GDGraph-1.4306/Graph.pm
+  10. http://search.cpan.org/~msergeant/XML-Parser-2.34/Parser.pm

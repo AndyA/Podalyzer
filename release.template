@@ -1,0 +1,15 @@
+Please visit:
+ http://hexten.net/wp-admin/post.php?action=edit&post=38
+
+And insert this code
+
+<tr>
+	<td>%VERSION%</td>
+	<td><a href="%LOCAL%">%ARCHIVE%</a> (%SIZE%)</td>
+	<td>%DATE%</td>
+</tr>
+
+in the list of releases. If necessary update the installation
+instructions as follows:
+
+%:docs/body.html%

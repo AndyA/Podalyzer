@@ -1,0 +1,71 @@
+NAME
+    podfeeder - Extract show names from an RSS feed
+
+SYNOPSIS
+    podfeeder [options] -db=[file] [feed ...]
+
+     Options:
+
+        -db=[file]              name of a file to contain file path to 
+                                podcast name mappings; mandatory
+        -pathmap=[file]         file that translates path names in the
+                                feed
+        -force                  update all shows found in feed
+        -help                   see this text
+        -man                    see this text as a man page
+
+OPTIONS
+    -db     This option is mandatory. It names the text file that contains
+            the mapping between podcast URIs and show names. Once updated
+            using podfeeder pass the name of this file to podalyzer to have
+            shows properly named in the podalyzer report.
+
+    -pathmap
+            If the feed uses different path names from those found in the
+            log file use a pathmap file to translate the paths found in the
+            feed. For example if the feed uses paths like
+
+                /podcasts/mycast/whatever.mp3
+
+            but the log files list requests for that file as
+
+                /media/someclient/whatever.mp3
+
+            make a file called pathmap.db containing the following
+
+                /podcasts/mycast/   /media/someclient/
+
+            and name it on the command line like this
+
+                podfeeder -pathmap=pathmap.db feed.xml > shows.db
+
+            to have shows.db contain properly translated paths.
+
+    -force  Force podfeeder to update all entries in the mapping file for
+            which it finds entries in the feed. Without this flag only
+            missing mappings will be added to the mapping file.
+
+DESCRIPTION
+    podfeeder fetches and analyses one or more RSS feeds to extract show
+    names for URIs and updates a mapping file which can then be passed to
+    podalyser to generate reports in which shows are correctly named.
+
+EXAMPLES
+        podfeeder -db=mapping.db http://example.com/category/podcasts/feed
+        podalyzer -db=mapping.db --outdir=report --title='Example Podcast' logs
+
+SEE ALSO
+        podalyser
+
+AUTHORS
+        Written by Andy Armstrong (andy@hexten.net) with much inspiration from Kevin Devin
+        (Friends in Tech). Kevin's podstats script may be found here:
+
+        http://forums.friendsintech.com/viewtopic.php?t=\
+           40&sid=055c024f369658b97e01dd7ef282d71d
+
+        (url wrapped for formatting - here is a shorter version: http://lyxus.net/cfv)
+
+BUGS
+        If you find any please report them to andy@hexten.net.
+
